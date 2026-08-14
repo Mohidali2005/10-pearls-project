@@ -20,5 +20,6 @@ hopsworks
 confluent-kafka
 
 streamlit
+plotly
 fastapi
 uvicorn
