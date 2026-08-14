@@ -2,7 +2,6 @@
 reference_notebooks/
 AQI_predict-1.pdf
 CLAUDE.md
-requirements.txt
 
 # Secrets
 .env
