@@ -2,6 +2,9 @@
 reference_notebooks/
 AQI_predict-1.pdf
 CLAUDE.md
+sample_report.tex
+REPORT.tex
+report_screenshots/
 
 # Secrets
 .env
@@ -34,3 +37,9 @@ env/
 Thumbs.db
 .vscode/
 .idea/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc

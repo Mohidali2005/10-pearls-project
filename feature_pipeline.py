@@ -87,6 +87,11 @@ def fetch_weather(lat,lon,start,end):
     r.raise_for_status()
     return r.json()
 
+# hudi upserts by primary key so a retried insert overwrites with the same values instead of duplicating
+@retry(stop=stop_after_attempt(3),wait=wait_exponential(min=5,max=30))
+def insert_fg(fg,df):
+    fg.insert(df,wait=True)
+
 def convert_units(conc,pollutant):
     if pollutant not in MOLECULAR_WEIGHTS:
         return conc
@@ -260,7 +265,7 @@ hourly_fg = fs.get_or_create_feature_group(
     time_travel_format="HUDI",
     statistics_config=False,
 )
-hourly_fg.insert(hourly,wait=True)
+insert_fg(hourly_fg,hourly)
 
 daily_fg = fs.get_or_create_feature_group(
     name="aqi_daily",
@@ -271,6 +276,6 @@ daily_fg = fs.get_or_create_feature_group(
     time_travel_format="HUDI",
     statistics_config=False,
 )
-daily_fg.insert(daily,wait=True)
+insert_fg(daily_fg,daily)
 
 print("upserted aqi_hourly and aqi_daily")
