@@ -3,6 +3,7 @@ import math
 import pathlib
 import tempfile
 import requests
+from contextlib import contextmanager
 from datetime import datetime,timedelta,timezone
 import pandas as pd
 import streamlit as st
@@ -104,6 +105,16 @@ def dominant_pollutant(concentrations):
     sub_indices = {p:calc_aqi(convert_units(c,p),p) for p,c in concentrations.items()}
     return max(sub_indices,key=sub_indices.get)
 
+@contextmanager
+def section(label):
+    # a broken chart or a library that changed its api on redeploy should take down its
+    # own block and nothing else, so every display section runs inside this
+    try:
+        yield
+    except Exception as err:
+        st.warning(f"{label} is unavailable right now.")
+        print(f"section '{label}' failed: {err!r}")
+
 def latest_conditions(city,hourly,daily):
     h = hourly[hourly["city"]==city].dropna(subset=["epa_aqi"]).sort_values("timestamp_utc")
     if len(h):
@@ -175,9 +186,14 @@ def build_row(city,lat,lon,daily,features):
         row[f"fc_humidity_d{h}"] = fc.loc[h-1,"humidity"]
     return base_date,row[features]
 
-model,features = load_model()
-daily = load_daily()
-hourly = load_hourly()
+try:
+    model,features = load_model()
+    daily = load_daily()
+    hourly = load_hourly()
+except Exception as err:
+    st.error("The dashboard cannot reach its data or model right now. This is usually temporary, please refresh in a minute.")
+    print(f"startup load failed: {err!r}")
+    st.stop()
 
 with st.sidebar:
     st.markdown("## Pearls AQI Predictor")
@@ -199,113 +215,134 @@ current_aqi = cond["aqi"]
 dominant = cond["dominant"]
 category,color = category_for(current_aqi)
 band_color = alert_color(current_aqi)
-base_date,X = build_row(city,lat,lon,daily,features)
-pred = model.predict(X)[0]
+
+forecast = None
+try:
+    base_date,X = build_row(city,lat,lon,daily,features)
+    pred = model.predict(X)[0]
+    forecast = (base_date,X,pred)
+except Exception as err:
+    print(f"forecast build failed: {err!r}")
 
 st.title(f"{city} air quality")
 
-gauge_col,info_col = st.columns([1,2])
-with gauge_col:
-    gauge = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=current_aqi,
-        number={"font":{"size":44}},
-        gauge={
-            "axis":{"range":[0,400]},
-            "bar":{"color":color},
-            "steps":[
-                {"range":[0,50],"color":"rgba(0,228,0,0.20)"},
-                {"range":[50,100],"color":"rgba(255,215,0,0.20)"},
-                {"range":[100,150],"color":"rgba(255,126,0,0.20)"},
-                {"range":[150,200],"color":"rgba(255,0,0,0.20)"},
-                {"range":[200,300],"color":"rgba(143,63,151,0.20)"},
-                {"range":[300,400],"color":"rgba(126,0,35,0.20)"},
-            ],
-        },
-    ))
-    gauge.update_layout(height=260,margin=dict(l=40,r=40,t=10,b=30))
-    st.plotly_chart(gauge,width="stretch")
-with info_col:
-    st.markdown(f"#### {category}")
-    st.caption(f"dominant pollutant : {dominant}")
-    m1,m2,m3,m4 = st.columns(4)
-    m1.metric("pm2.5",f"{cond['pm2_5']:.0f}")
-    m2.metric("pm10",f"{cond['pm10']:.0f}")
-    m3.metric("o3",f"{cond['o3']:.0f}")
-    m4.metric("no2",f"{cond['no2']:.0f}")
-    st.markdown(f"""
-    <div style="background-color:{band_color};padding:0.9rem 1.2rem;border-radius:0.5rem;color:white;margin-top:0.5rem;">
-    <strong>Hazard alert : {category}</strong><br>{HEALTH_GUIDANCE[category]}
-    </div>
-    """,unsafe_allow_html=True)
-
-st.subheader("Three day forecast")
-cols = st.columns(3)
-for i,col in enumerate(cols):
-    day = base_date+pd.Timedelta(days=i+1)
-    aqi_val = pred[i]
-    cat,cat_color = category_for(aqi_val)
-    with col:
+with section("Current conditions"):
+    gauge_col,info_col = st.columns([1,2])
+    with gauge_col:
+        gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=current_aqi,
+            number={"font":{"size":44}},
+            gauge={
+                "axis":{"range":[0,400]},
+                "bar":{"color":color},
+                "steps":[
+                    {"range":[0,50],"color":"rgba(0,228,0,0.20)"},
+                    {"range":[50,100],"color":"rgba(255,215,0,0.20)"},
+                    {"range":[100,150],"color":"rgba(255,126,0,0.20)"},
+                    {"range":[150,200],"color":"rgba(255,0,0,0.20)"},
+                    {"range":[200,300],"color":"rgba(143,63,151,0.20)"},
+                    {"range":[300,400],"color":"rgba(126,0,35,0.20)"},
+                ],
+            },
+        ))
+        gauge.update_layout(height=260,margin=dict(l=40,r=40,t=10,b=30))
+        st.plotly_chart(gauge,width="stretch")
+    with info_col:
+        st.markdown(f"#### {category}")
+        st.caption(f"dominant pollutant : {dominant}")
+        m1,m2,m3,m4 = st.columns(4)
+        m1.metric("pm2.5",f"{cond['pm2_5']:.0f}")
+        m2.metric("pm10",f"{cond['pm10']:.0f}")
+        m3.metric("o3",f"{cond['o3']:.0f}")
+        m4.metric("no2",f"{cond['no2']:.0f}")
         st.markdown(f"""
-        <div style="border:1px solid #E0E0E0;border-radius:0.5rem;padding:1rem;text-align:center;">
-        <div style="font-size:0.85rem;color:gray;">{day:%A, %d %b}</div>
-        <div style="font-size:2.2rem;font-weight:700;color:{cat_color};">{aqi_val:.0f}</div>
-        <div style="font-size:0.9rem;">{cat}</div>
+        <div style="background-color:{band_color};padding:0.9rem 1.2rem;border-radius:0.5rem;color:white;margin-top:0.5rem;">
+        <strong>Hazard alert : {category}</strong><br>{HEALTH_GUIDANCE[category]}
         </div>
         """,unsafe_allow_html=True)
 
-st.subheader("30 day trend and forecast")
-city_daily = daily[daily["city"]==city].sort_values("date").tail(30)
-trend = go.Figure()
-bands = [(0,50,"green"),(50,100,"gold"),(100,150,"orange"),(150,200,"red"),(200,300,"purple"),(300,400,"darkred")]
-for lo,hi,c in bands:
-    trend.add_hrect(y0=lo,y1=hi,fillcolor=c,opacity=0.07,line_width=0)
-trend.add_trace(go.Scatter(x=city_daily["date"],y=city_daily["aqi"],mode="lines+markers",name="actual",line=dict(color="steelblue",width=2)))
-future_dates = [base_date+pd.Timedelta(days=i+1) for i in range(3)]
-trend.add_trace(go.Scatter(x=[base_date]+future_dates,y=[city_daily["aqi"].iloc[-1]]+list(pred),mode="lines+markers",name="forecast",line=dict(color="darkorange",width=2,dash="dash")))
-trend.update_layout(height=420,margin=dict(l=20,r=20,t=10,b=10),yaxis_title="AQI",legend=dict(orientation="h",yanchor="bottom",y=1.02))
-st.plotly_chart(trend,width="stretch")
+st.subheader("Three day forecast")
+if forecast is None:
+    st.info("The forecast is unavailable right now, check back shortly.")
+else:
+    base_date,X,pred = forecast
+    with section("Three day forecast"):
+        cols = st.columns(3)
+        for i,col in enumerate(cols):
+            day = base_date+pd.Timedelta(days=i+1)
+            aqi_val = pred[i]
+            cat,cat_color = category_for(aqi_val)
+            with col:
+                st.markdown(f"""
+                <div style="border:1px solid #E0E0E0;border-radius:0.5rem;padding:1rem;text-align:center;">
+                <div style="font-size:0.85rem;color:gray;">{day:%A, %d %b}</div>
+                <div style="font-size:2.2rem;font-weight:700;color:{cat_color};">{aqi_val:.0f}</div>
+                <div style="font-size:0.9rem;">{cat}</div>
+                </div>
+                """,unsafe_allow_html=True)
 
-st.subheader("All cities right now")
-comp_rows = []
-for c,(la,lo) in CITIES.items():
-    cc = latest_conditions(c,hourly,daily)
-    if cc is None:
-        continue
-    cat,cat_color = category_for(cc["aqi"])
-    comp_rows.append({"city":c,"lat":la,"lon":lo,"aqi":cc["aqi"],"category":cat})
-comp = pd.DataFrame(comp_rows)
-color_map = {name:color for _,name,color in AQI_CATEGORIES}
+with section("30 day trend and forecast"):
+    st.subheader("30 day trend and forecast")
+    city_daily = daily[daily["city"]==city].sort_values("date").tail(30)
+    trend = go.Figure()
+    bands = [(0,50,"green"),(50,100,"gold"),(100,150,"orange"),(150,200,"red"),(200,300,"purple"),(300,400,"darkred")]
+    for lo,hi,c in bands:
+        trend.add_hrect(y0=lo,y1=hi,fillcolor=c,opacity=0.07,line_width=0)
+    trend.add_trace(go.Scatter(x=city_daily["date"],y=city_daily["aqi"],mode="lines+markers",name="actual",line=dict(color="steelblue",width=2)))
+    if forecast is not None:
+        base_date,X,pred = forecast
+        future_dates = [base_date+pd.Timedelta(days=i+1) for i in range(3)]
+        trend.add_trace(go.Scatter(x=[base_date]+future_dates,y=[city_daily["aqi"].iloc[-1]]+list(pred),mode="lines+markers",name="forecast",line=dict(color="darkorange",width=2,dash="dash")))
+    trend.update_layout(height=420,margin=dict(l=20,r=20,t=10,b=10),yaxis_title="AQI",legend=dict(orientation="h",yanchor="bottom",y=1.02))
+    st.plotly_chart(trend,width="stretch")
 
-map_col,bar_col = st.columns(2)
-with map_col:
-    fig_map = px.scatter_mapbox(comp,lat="lat",lon="lon",size="aqi",color="category",color_discrete_map=color_map,hover_name="city",hover_data={"aqi":":.0f","lat":False,"lon":False,"category":False},zoom=4.2,height=380)
-    fig_map.update_layout(mapbox_style="open-street-map",margin=dict(l=0,r=0,t=0,b=0),legend=dict(orientation="h",yanchor="bottom",y=1.02))
-    st.plotly_chart(fig_map,width="stretch")
-with bar_col:
-    fig_bar = px.bar(comp.sort_values("aqi"),x="aqi",y="city",orientation="h",color="category",color_discrete_map=color_map,text="aqi")
-    fig_bar.update_traces(texttemplate="%{text:.0f}",textposition="outside")
-    fig_bar.update_layout(height=380,margin=dict(l=20,r=20,t=10,b=10),showlegend=False,xaxis_title="AQI",yaxis_title=None)
-    st.plotly_chart(fig_bar,width="stretch")
+with section("All cities comparison"):
+    st.subheader("All cities right now")
+    comp_rows = []
+    for c,(la,lo) in CITIES.items():
+        cc = latest_conditions(c,hourly,daily)
+        if cc is None:
+            continue
+        cat,cat_color = category_for(cc["aqi"])
+        comp_rows.append({"city":c,"lat":la,"lon":lo,"aqi":cc["aqi"],"category":cat})
+    comp = pd.DataFrame(comp_rows)
+    color_map = {name:color for _,name,color in AQI_CATEGORIES}
+    map_col,bar_col = st.columns(2)
+    with map_col:
+        fig_map = px.scatter_map(comp,lat="lat",lon="lon",size="aqi",color="category",color_discrete_map=color_map,hover_name="city",hover_data={"aqi":":.0f","lat":False,"lon":False,"category":False},zoom=4.2,height=380)
+        fig_map.update_layout(map_style="open-street-map",margin=dict(l=0,r=0,t=0,b=0),legend=dict(orientation="h",yanchor="bottom",y=1.02))
+        st.plotly_chart(fig_map,width="stretch")
+    with bar_col:
+        fig_bar = px.bar(comp.sort_values("aqi"),x="aqi",y="city",orientation="h",color="category",color_discrete_map=color_map,text="aqi")
+        fig_bar.update_traces(texttemplate="%{text:.0f}",textposition="outside")
+        fig_bar.update_layout(height=380,margin=dict(l=20,r=20,t=10,b=10),showlegend=False,xaxis_title="AQI",yaxis_title=None)
+        st.plotly_chart(fig_bar,width="stretch")
 
 tab1,tab2 = st.tabs(["Explainability","Model performance"])
 
 with tab1:
     st.markdown(f"What is driving tomorrow's forecast for {city}.")
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(X)
-    sv = shap_values[:,:,0]
-    explanation = shap.Explanation(values=sv[0],base_values=explainer.expected_value[0],data=X.iloc[0].values,feature_names=features)
-    plt.figure(figsize=(9,6))
-    shap.plots.waterfall(explanation,show=False,max_display=12)
-    st.pyplot(plt.gcf(),width="stretch")
-    plt.close()
+    if forecast is None:
+        st.info("Explainability needs the forecast, which is unavailable right now.")
+    else:
+        with section("Explainability"):
+            base_date,X,pred = forecast
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(X)
+            sv = shap_values[:,:,0]
+            explanation = shap.Explanation(values=sv[0],base_values=explainer.expected_value[0],data=X.iloc[0].values,feature_names=features)
+            plt.figure(figsize=(9,6))
+            shap.plots.waterfall(explanation,show=False,max_display=12)
+            st.pyplot(plt.gcf(),width="stretch")
+            plt.close()
 
 with tab2:
-    st.markdown("Average RMSE by model and forecast horizon, across all five cities on the last 60 day test period.")
-    comparison = pd.read_csv("outputs/model_comparison.csv")
-    summary = comparison.groupby(["model","horizon"])["rmse"].mean().unstack()[["aqi_d1","aqi_d2","aqi_d3"]].round(2)
-    st.dataframe(summary,width="stretch")
-    st.markdown("Per city RMSE for random forest, the model in production.")
-    detail = comparison[comparison["model"]=="random_forest"].pivot(index="city",columns="horizon",values="rmse")[["aqi_d1","aqi_d2","aqi_d3"]].round(2)
-    st.dataframe(detail,width="stretch")
+    with section("Model performance"):
+        st.markdown("Average RMSE by model and forecast horizon, across all five cities on the last 60 day test period.")
+        comparison = pd.read_csv("outputs/model_comparison.csv")
+        summary = comparison.groupby(["model","horizon"])["rmse"].mean().unstack()[["aqi_d1","aqi_d2","aqi_d3"]].round(2)
+        st.dataframe(summary,width="stretch")
+        st.markdown("Per city RMSE for random forest, the model in production.")
+        detail = comparison[comparison["model"]=="random_forest"].pivot(index="city",columns="horizon",values="rmse")[["aqi_d1","aqi_d2","aqi_d3"]].round(2)
+        st.dataframe(detail,width="stretch")
