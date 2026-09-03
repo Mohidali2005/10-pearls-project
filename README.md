@@ -1,158 +1,117 @@
 # Pearls AQI Predictor
 
-I built this during my internship at 10Pearls. It forecasts the Air Quality Index
-three days ahead for five Pakistani cities: Karachi, Lahore, Faisalabad, Islamabad
-and Peshawar. Everything runs on free tiers and updates itself, so there is no server
-to keep alive.
+This is my internship project at 10Pearls. It predicts the Air Quality Index three days
+ahead for Karachi, Lahore, Faisalabad, Islamabad and Peshawar, and it runs entirely on
+free services that refresh themselves, so nothing has to be hosted or kept alive by hand.
 
-**Live dashboard:** https://pearls-aqi-predictor-mohid.streamlit.app
+Live dashboard: https://pearls-aqi-predictor-mohid.streamlit.app
 
 ## What it does
 
-Every hour a pipeline fetches the latest pollution and weather readings, works out the
-real US EPA air quality index for each city and saves it to a feature store. Once a day
-a second pipeline retrains the forecasting model on the full history. The dashboard
-reads from the same feature store and shows the current air quality, a three day
-forecast, a health warning that matches the EPA category and a chart that explains what
-pushed each prediction up or down.
+Once an hour a script pulls the latest pollution numbers from OpenWeather and the latest
+weather from Open-Meteo, turns them into a proper US EPA air quality index for each city
+and stores the result in a Hopsworks feature store. Once a day another script retrains
+the forecasting model on everything collected so far. The dashboard reads from the same
+store and shows the current air quality, the three day forecast, a health warning and a
+small chart explaining which pollutant or weather variable moved the prediction.
 
-## Computing the AQI
+## About the AQI number
 
-OpenWeather gives you an `aqi` field but it is just a number from 1 to 5, which is far
-too coarse to train a regression on. So the project computes the actual US EPA AQI, the
-0 to 500 scale that aqicn.org and most real dashboards show, from the raw pollutant
-concentrations.
+OpenWeather does return an air quality value but it is only a 1 to 5 rating, which is not
+something you can sensibly train a regression on. So the project builds the real EPA AQI
+instead, the familiar 0 to 500 scale, from the raw pollutant concentrations.
 
-That means:
+Getting there takes a few steps. Ozone, carbon monoxide, sulphur dioxide and nitrogen
+dioxide have to be converted from micrograms per cubic metre into the parts per million
+or parts per billion the EPA tables use. Each pollutant then gets averaged over its own
+window, which is 24 hours for the two particulate sizes, 8 hours for ozone and carbon
+monoxide and 1 hour for the other two. After that it is a lookup in the 2024 EPA
+breakpoint table with linear interpolation, and the overall AQI is just the worst of the
+individual pollutant scores. The project also records which pollutant that was, and in
+Pakistan it is PM2.5 nearly every hour of the year.
 
-- converting O3, CO, SO2 and NO2 from µg/m³ into the ppm or ppb the EPA tables expect
-- rolling each pollutant over the window the EPA asks for, which is 24 hours for PM2.5
-  and PM10, 8 hours for O3 and CO, and 1 hour for SO2 and NO2
-- looking each value up in the 2024 EPA breakpoint table and interpolating
-- taking the highest sub-index as the overall AQI and recording which pollutant it
-  came from
+## How the pieces fit together
 
-In Pakistan that pollutant is PM2.5 almost every hour of the year.
+There are two GitHub Actions workflows on a schedule. The hourly one runs the feature
+script, which fetches a recent window of data, rebuilds the features and writes them to
+two feature groups in Hopsworks. One group holds the hourly readings and the other rolls
+them up to a single row per city per day with lag columns, rolling averages and the
+coming three days of forecast weather attached.
 
-## The pipeline
+The daily workflow runs the training script. It reads the daily table back out of the
+feature store, retrains a random forest and compares it against whatever model is
+already registered. It only keeps the new one if it actually scored better, so a bad day
+in the data can never push a worse model into production.
 
-```
-OpenWeather Air Pollution  ─┐
-                            ├─►  feature_pipeline.py  ─►  Hopsworks feature store
-Open-Meteo weather         ─┘     (hourly, GitHub Actions)    aqi_hourly, aqi_daily
-                                                                     │
-                                  training_pipeline.py  ────────────►  Hopsworks model registry
-                                  (daily, GitHub Actions)             best model + metrics
-                                                                     │
-                                  app.py (Streamlit)  ◄──────────────┘
-```
-
-The feature pipeline runs on a GitHub Actions cron every hour. It pulls a recent window
-of data, recomputes the features and upserts two feature groups in Hopsworks. `aqi_hourly`
-keeps the hourly readings and preserves the daily cycle. `aqi_daily` rolls those up per
-city per day and adds lag features, rolling averages and the next three days of forecast
-weather.
-
-The training pipeline runs once a day. It reads `aqi_daily` back from the feature store,
-retrains the model and only registers the new version if it beats the one already in the
-registry, so a bad retrain can never replace a good model.
-
-Both scripts are self contained. A GitHub Actions runner starts from nothing every time,
-so neither one reads any local files or assumes a previous run happened.
+Neither script holds any state between runs. A GitHub runner is a blank machine every
+time, so both scripts fetch what they need and rebuild everything from scratch on every
+run.
 
 ## The model
 
-I tried six approaches and scored them on the most recent 60 days, which none of the
-models see while training. Average RMSE across the five cities:
+I tried a plain persistence baseline, ridge regression, SARIMAX, an LSTM, XGBoost and a
+random forest, and scored all of them on the last sixty days of data that none of them
+saw during training. The random forest was clearly the best. It lands around an RMSE of
+10 on the one day forecast, where simply repeating today's value scores about 18, and it
+stays ahead at two and three days as well. XGBoost came second. Ridge was a bit of a
+surprise, it does worse than the do-nothing baseline past the first day, because a
+linear model does not have the room a tree ensemble does to keep correcting itself as
+the horizon grows.
 
-| model | 1 day | 2 days | 3 days |
-|---|---|---|---|
-| persistence (just repeat today) | 18.4 | 26.6 | 29.6 |
-| ridge regression | 17.7 | 27.7 | 31.0 |
-| SARIMAX | 17.5 | 24.3 | 26.1 |
-| LSTM | 13.1 | 22.8 | 26.6 |
-| XGBoost | 12.8 | 23.5 | 24.0 |
-| random forest | 10.5 | 20.4 | 23.5 |
+One model covers all five cities rather than one model each. The city goes in as a plain
+one hot column. That way it trains on five times the data and there is a single thing to
+deploy, and I still report the error separately per city so a weak one cannot hide in
+the average.
 
-The random forest wins at every horizon so that is what runs in production. Ridge is the
-one worth a comment: it actually does worse than just repeating today's value at two and
-three days out, because a straight line through 58 mostly correlated columns has nowhere
-near the room a tree ensemble has to correct itself further out.
+The train and test split is by date, never random. Validation uses time series cross
+validation. If you shuffle rows on lagged time series data you leak future information
+into training and get an R² around 0.95 that means nothing, and that is the usual way a
+project like this quietly goes wrong.
 
-A few choices that shaped the results:
-
-- **One model for all five cities**, with the city as a one hot feature. That gives five
-  times the training data and one artifact to serve. Metrics are still broken out per
-  city so a weak city cannot hide inside the average.
-- **Time based splits only.** The test set is the last stretch of the data and validation
-  uses time-series cross-validation. A random split on lagged time series data leaks the
-  future and hands you a fake R² around 0.95. This is the most common way this kind of
-  project goes wrong.
-- **Forecast weather as a feature.** Open-Meteo publishes free weather forecasts a week
-  out, and wind, rain and temperature really do help predict AQI. Wind disperses
-  particulates and rain washes them out. Those columns exist at prediction time so it is
-  fair to feed them to the model.
+The forecast weather columns are worth a note. Open-Meteo gives a free seven day weather
+forecast, and wind, rain and temperature genuinely help. Wind spreads the particulates
+out and rain drags them down. A real forecast for those is available at the moment of
+prediction, so it is fair to feed them to the model as inputs.
 
 ## The dashboard
 
-`app.py` is a Streamlit app. For the chosen city it shows a gauge with the current AQI
-shaded by the six EPA bands, the category and dominant pollutant, a live pollutant
-readout and a coloured hazard alert with matching health advice. Under that are the
-three day forecast cards, a 30 day history chart with the forecast added on the end, and
-a map and bar chart comparing all five cities right now. Two tabs at the bottom hold a
-SHAP breakdown of the current prediction and the full model comparison table.
+app.py is a Streamlit app. Pick a city and it shows a gauge for the current AQI coloured
+by the six EPA bands, the category and the dominant pollutant, the live pollutant
+readings and a coloured health alert. Under that are the three forecast days, a thirty
+day history with the forecast drawn on the end, and a small map and bar chart putting
+all five cities next to each other. Two tabs hold the SHAP explanation for the current
+prediction and the full table of every model I tested.
 
-Each section renders inside its own guard. If one chart or one library breaks after a
-redeploy, that block shows a short notice and the rest of the page keeps working.
+If a chart or a library breaks after a redeploy, that one part of the page shows a short
+message and the rest still loads.
 
-## Repo layout
+## Running it
 
-```
-AQI_Predictor.ipynb    the whole build in one notebook, meant to be read top to bottom
-feature_pipeline.py    the hourly job, run by GitHub Actions
-training_pipeline.py   the daily retrain, run by GitHub Actions
-app.py                 the Streamlit dashboard
-.github/workflows/     the two cron schedules
-requirements.txt       pinned where a version drift has bitten before
-REPORT.pdf             the written report
-```
+You will need a free OpenWeather key and a free Hopsworks account. Make a file called
+.env in the project folder with three lines:
 
-The notebook defines every function inline so it reads as one continuous piece of work
-rather than a set of scripts. The two pipeline files are a copy of the cells they need,
-which is roughly 150 repeated lines. That is a deliberate trade for a notebook you can
-open and run start to end.
+    OPENWEATHER_API_KEY=your_key
+    HOPSWORKS_API_KEY=your_key
+    HOPSWORKS_PROJECT=your_project_name
 
-## Running it yourself
+Then install the requirements and open whichever part you want:
 
-You need a free OpenWeather API key and a free Hopsworks account. Put them in a `.env`
-file in the project root:
+    pip install -r requirements.txt
+    jupyter notebook AQI_Predictor.ipynb
+    streamlit run app.py
 
-```
-OPENWEATHER_API_KEY=your_key
-HOPSWORKS_API_KEY=your_key
-HOPSWORKS_PROJECT=your_project_name
-```
+The notebook is the full story from the data pull to the trained model and is meant to
+be read straight through. feature_pipeline.py and training_pipeline.py are the two
+scheduled jobs. app.py is the dashboard. The written report is REPORT.pdf. The first
+notebook run backfills three years of history and is slow, but it saves checkpoints to
+disk as it goes so a crash does not cost you the whole download.
 
-Then:
+## Things that are not perfect
 
-```
-pip install -r requirements.txt
-jupyter notebook AQI_Predictor.ipynb    # to walk through the whole build
-streamlit run app.py                    # to run the dashboard locally
-```
-
-On its first run the notebook backfills three years of history, which is slow, so it
-saves parquet checkpoints along the way and a crash never costs you the whole pull.
-
-## Things to know
-
-- OpenWeather's pollution data comes from the CAMS model, not ground stations. It is
-  smoother than reality and will not line up exactly with aqicn.org. That is a known
-  limitation, not a bug, and the dashboard says so too.
-- During the historical backfill the forecast weather columns are filled from the ERA5
-  archive, which is effectively a perfect forecast. Backtest scores are a little
-  optimistic next to real live performance because of that.
-- GitHub Actions cron is best effort. A scheduled run is often 5 to 20 minutes late, and
-  GitHub switches scheduled workflows off after 60 days with no commits to the repo.
-- The Hopsworks free tier has storage limits, which is why the project keeps to two
-  feature groups.
+OpenWeather's pollution data comes out of the CAMS model rather than physical ground
+stations, so it is smoother than the real air and will not match a site like aqicn.org
+exactly. During the historical backfill the forecast weather is actually taken from the
+archive, which is a perfect forecast, so the backtest scores flatter the model a little
+next to live use. GitHub's scheduled runs are best effort and can be twenty minutes
+late, and GitHub turns them off after sixty days without a commit. The Hopsworks free
+tier also limits how much you can store, which is why there are only two feature groups.
