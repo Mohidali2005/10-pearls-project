@@ -1,4 +1,5 @@
 import os
+import math
 import pathlib
 import tempfile
 import requests
@@ -70,6 +71,51 @@ def alert_color(aqi):
         return "red"
     return "maroon"
 
+# same EPA breakpoint arithmetic as the feature pipeline, used only to name the dominant
+# pollutant when the dashboard has to fall back to the daily averages
+BREAKPOINTS = {
+    "pm2_5":[(0.0,9.0,0,50),(9.1,35.4,51,100),(35.5,55.4,101,150),(55.5,125.4,151,200),(125.5,225.4,201,300),(225.5,325.4,301,500)],
+    "pm10":[(0,54,0,50),(55,154,51,100),(155,254,101,150),(255,354,151,200),(355,424,201,300),(425,604,301,500)],
+    "o3":[(0.000,0.054,0,50),(0.055,0.070,51,100),(0.071,0.085,101,150),(0.086,0.105,151,200),(0.106,0.200,201,300)],
+    "co":[(0.0,4.4,0,50),(4.5,9.4,51,100),(9.5,12.4,101,150),(12.5,15.4,151,200),(15.5,30.4,201,300),(30.5,50.4,301,500)],
+    "so2":[(0,35,0,50),(36,75,51,100),(76,185,101,150),(186,304,151,200),(305,604,201,300),(605,1004,301,500)],
+    "no2":[(0,53,0,50),(54,100,51,100),(101,360,101,150),(361,649,151,200),(650,1249,201,300),(1250,2049,301,500)],
+}
+MOLECULAR_WEIGHTS = {"o3":48.0,"co":28.01,"so2":64.06,"no2":46.01}
+TRUNCATE_DECIMALS = {"pm2_5":1,"pm10":0,"o3":3,"co":1,"so2":0,"no2":0}
+
+def convert_units(conc,pollutant):
+    if pollutant not in MOLECULAR_WEIGHTS:
+        return conc
+    ppb = conc*24.45/MOLECULAR_WEIGHTS[pollutant]
+    if pollutant in ("o3","co"):
+        return ppb/1000
+    return ppb
+
+def calc_aqi(conc,pollutant):
+    factor = 10**TRUNCATE_DECIMALS[pollutant]
+    conc = math.floor(conc*factor)/factor
+    for bp_lo,bp_hi,aqi_lo,aqi_hi in BREAKPOINTS[pollutant]:
+        if bp_lo<=conc<=bp_hi:
+            return (aqi_hi-aqi_lo)/(bp_hi-bp_lo)*(conc-bp_lo)+aqi_lo
+    return 500
+
+def dominant_pollutant(concentrations):
+    sub_indices = {p:calc_aqi(convert_units(c,p),p) for p,c in concentrations.items()}
+    return max(sub_indices,key=sub_indices.get)
+
+def latest_conditions(city,hourly,daily):
+    h = hourly[hourly["city"]==city].dropna(subset=["epa_aqi"]).sort_values("timestamp_utc")
+    if len(h):
+        r = h.iloc[-1]
+        return {"aqi":r["epa_aqi"],"dominant":r["dominant_pollutant"],"pm2_5":r["pm2_5"],"pm10":r["pm10"],"o3":r["o3"],"no2":r["no2"],"as_of":f"{r['timestamp_pkt']:%d %b %Y, %H:%M} PKT","stale":False}
+    d = daily[daily["city"]==city].dropna(subset=["aqi"]).sort_values("date")
+    if len(d):
+        r = d.iloc[-1]
+        conc = {"pm2_5":r["pm2_5_mean"],"pm10":r["pm10_mean"],"o3":r["o3_mean"],"co":r["co_mean"],"so2":r["so2_mean"],"no2":r["no2_mean"]}
+        return {"aqi":r["aqi"],"dominant":dominant_pollutant(conc),"pm2_5":r["pm2_5_mean"],"pm10":r["pm10_mean"],"o3":r["o3_mean"],"no2":r["no2_mean"],"as_of":f"{r['date']:%d %b %Y} daily average","stale":True}
+    return None
+
 @st.cache_resource
 def get_project():
     return hopsworks.login(host="eu-west.cloud.hopsworks.ai",api_key_value=HOPSWORKS_KEY,project=HOPSWORKS_PROJECT,cert_folder=tempfile.gettempdir())
@@ -91,7 +137,8 @@ def load_daily():
 @st.cache_data(ttl=3600)
 def load_hourly():
     fg = get_project().get_feature_store().get_feature_group(name="aqi_hourly",version=1)
-    cutoff = (datetime.now(timezone.utc)-timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    # 10 days rather than 2 so a late or skipped feature pipeline run still leaves a recent row to show
+    cutoff = (datetime.now(timezone.utc)-timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
     hourly = fg.filter(fg.timestamp_utc>=cutoff).read()
     return hourly.sort_values(["city","timestamp_utc"]).reset_index(drop=True)
 
@@ -133,13 +180,18 @@ with st.sidebar:
     city = st.selectbox("City",list(CITIES))
     lat,lon = CITIES[city]
     st.divider()
-    latest_hour = hourly[hourly["city"]==city].dropna(subset=["epa_aqi"]).sort_values("timestamp_utc").iloc[-1]
-    st.caption(f"data as of {latest_hour['timestamp_pkt']:%d %b %Y, %H:%M} PKT")
+    cond = latest_conditions(city,hourly,daily)
+    if cond is None:
+        st.error("No recent data in the feature store for this city. The feature pipeline may be behind, check back shortly.")
+        st.stop()
+    st.caption(f"data as of {cond['as_of']}")
+    if cond["stale"]:
+        st.warning("The hourly feed is behind so the current conditions below are the most recent daily average.")
     with st.expander("About this dashboard"):
         st.markdown("The AQI shown here is the US EPA AQI, calculated from raw pollutant concentrations and not OpenWeather's coarse 1 to 5 index. OpenWeather's pollution data comes from the CAMS atmospheric model and not ground stations, so it reads smoother than a ground monitor and will not match aqicn.org exactly. The dominant pollutant is whichever one produces the highest AQI after EPA's own conversion table, not whichever has the biggest raw number, which is why pm2.5 usually wins even when pm10's reading looks higher.")
 
-current_aqi = latest_hour["epa_aqi"]
-dominant = latest_hour["dominant_pollutant"]
+current_aqi = cond["aqi"]
+dominant = cond["dominant"]
 category,color = category_for(current_aqi)
 band_color = alert_color(current_aqi)
 base_date,X = build_row(city,lat,lon,daily,features)
@@ -172,10 +224,10 @@ with info_col:
     st.markdown(f"#### {category}")
     st.caption(f"dominant pollutant : {dominant}")
     m1,m2,m3,m4 = st.columns(4)
-    m1.metric("pm2.5",f"{latest_hour['pm2_5']:.0f}")
-    m2.metric("pm10",f"{latest_hour['pm10']:.0f}")
-    m3.metric("o3",f"{latest_hour['o3']:.0f}")
-    m4.metric("no2",f"{latest_hour['no2']:.0f}")
+    m1.metric("pm2.5",f"{cond['pm2_5']:.0f}")
+    m2.metric("pm10",f"{cond['pm10']:.0f}")
+    m3.metric("o3",f"{cond['o3']:.0f}")
+    m4.metric("no2",f"{cond['no2']:.0f}")
     st.markdown(f"""
     <div style="background-color:{band_color};padding:0.9rem 1.2rem;border-radius:0.5rem;color:white;margin-top:0.5rem;">
     <strong>Hazard alert : {category}</strong><br>{HEALTH_GUIDANCE[category]}
@@ -212,9 +264,11 @@ st.plotly_chart(trend,width="stretch")
 st.subheader("All cities right now")
 comp_rows = []
 for c,(la,lo) in CITIES.items():
-    lh = hourly[hourly["city"]==c].dropna(subset=["epa_aqi"]).sort_values("timestamp_utc").iloc[-1]
-    cat,cat_color = category_for(lh["epa_aqi"])
-    comp_rows.append({"city":c,"lat":la,"lon":lo,"aqi":lh["epa_aqi"],"category":cat})
+    cc = latest_conditions(c,hourly,daily)
+    if cc is None:
+        continue
+    cat,cat_color = category_for(cc["aqi"])
+    comp_rows.append({"city":c,"lat":la,"lon":lo,"aqi":cc["aqi"],"category":cat})
 comp = pd.DataFrame(comp_rows)
 color_map = {name:color for _,name,color in AQI_CATEGORIES}
 
