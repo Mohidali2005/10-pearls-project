@@ -157,8 +157,13 @@ def load_forecast_weather(lat,lon):
 
 def build_row(city,lat,lon,daily,features):
     core_features = [f for f in features if not f.startswith("fc_")]
-    city_daily = daily[daily["city"]==city].rename(columns={f.lower():f for f in features})
-    city_daily = city_daily.dropna(subset=core_features).sort_values("date")
+    city_daily = daily[daily["city"]==city].rename(columns={f.lower():f for f in features}).sort_values("date")
+    # one upstream day with no computable aqi blanks the 7 day rolling aqi columns for a
+    # week or more, so carry the last good value forward rather than discarding every
+    # recent row and falling back to a base date from last month
+    roll_cols = [f for f in core_features if "roll" in f]
+    city_daily[roll_cols] = city_daily[roll_cols].ffill().bfill()
+    city_daily = city_daily.dropna(subset=core_features)
     row = city_daily.iloc[[-1]].copy()
     base_date = row["date"].iloc[0]
     fc = load_forecast_weather(lat,lon)
