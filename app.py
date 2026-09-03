@@ -201,7 +201,11 @@ with st.sidebar:
     city = st.selectbox("City",list(CITIES))
     lat,lon = CITIES[city]
     st.divider()
-    cond = latest_conditions(city,hourly,daily)
+    try:
+        cond = latest_conditions(city,hourly,daily)
+    except Exception as err:
+        cond = None
+        print(f"latest_conditions failed: {err!r}")
     if cond is None:
         st.error("No recent data in the feature store for this city. The feature pipeline may be behind, check back shortly.")
         st.stop()
