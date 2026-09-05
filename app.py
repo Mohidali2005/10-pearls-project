@@ -20,6 +20,9 @@ load_dotenv()
 HOPSWORKS_KEY = os.getenv("HOPSWORKS_API_KEY")
 HOPSWORKS_PROJECT = os.getenv("HOPSWORKS_PROJECT")
 
+DARK_BG = "#0E1117"  # matches backgroundColor in .streamlit/config.toml
+plt.style.use("dark_background")
+
 st.set_page_config(page_title="Pearls AQI Predictor",page_icon="🌫️",layout="wide",initial_sidebar_state="expanded")
 
 CITIES = {
@@ -53,7 +56,7 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 st.markdown("""
 <style>
 .block-container{padding-top:2rem;padding-bottom:3rem;}
-div[data-testid="stMetric"]{background-color:#F4F6F8;border-radius:0.5rem;padding:0.75rem 1rem;}
+div[data-testid="stMetric"]{background-color:#161B22;border:1px solid #30363D;border-radius:0.5rem;padding:0.75rem 1rem;}
 </style>
 """,unsafe_allow_html=True)
 
@@ -240,17 +243,19 @@ with section("Current conditions"):
             gauge={
                 "axis":{"range":[0,400]},
                 "bar":{"color":color},
+                "bgcolor":DARK_BG,
+                "borderwidth":0,
                 "steps":[
-                    {"range":[0,50],"color":"rgba(0,228,0,0.20)"},
-                    {"range":[50,100],"color":"rgba(255,215,0,0.20)"},
-                    {"range":[100,150],"color":"rgba(255,126,0,0.20)"},
-                    {"range":[150,200],"color":"rgba(255,0,0,0.20)"},
-                    {"range":[200,300],"color":"rgba(143,63,151,0.20)"},
-                    {"range":[300,400],"color":"rgba(126,0,35,0.20)"},
+                    {"range":[0,50],"color":"rgba(0,228,0,0.35)"},
+                    {"range":[50,100],"color":"rgba(255,215,0,0.35)"},
+                    {"range":[100,150],"color":"rgba(255,126,0,0.35)"},
+                    {"range":[150,200],"color":"rgba(255,0,0,0.35)"},
+                    {"range":[200,300],"color":"rgba(143,63,151,0.35)"},
+                    {"range":[300,400],"color":"rgba(126,0,35,0.35)"},
                 ],
             },
         ))
-        gauge.update_layout(height=260,margin=dict(l=40,r=40,t=10,b=30))
+        gauge.update_layout(height=260,margin=dict(l=40,r=40,t=10,b=30),template="plotly_dark",paper_bgcolor=DARK_BG,font=dict(color="#E6EDF3"))
         st.plotly_chart(gauge,width="stretch")
     with info_col:
         st.markdown(f"#### {category}")
@@ -279,8 +284,8 @@ else:
             cat,cat_color = category_for(aqi_val)
             with col:
                 st.markdown(f"""
-                <div style="border:1px solid #E0E0E0;border-radius:0.5rem;padding:1rem;text-align:center;">
-                <div style="font-size:0.85rem;color:gray;">{day:%A, %d %b}</div>
+                <div style="border:1px solid #30363D;background-color:#161B22;border-radius:0.5rem;padding:1rem;text-align:center;">
+                <div style="font-size:0.85rem;color:#8B949E;">{day:%A, %d %b}</div>
                 <div style="font-size:2.2rem;font-weight:700;color:{cat_color};">{aqi_val:.0f}</div>
                 <div style="font-size:0.9rem;">{cat}</div>
                 </div>
@@ -292,13 +297,13 @@ with section("30 day trend and forecast"):
     trend = go.Figure()
     bands = [(0,50,"green"),(50,100,"gold"),(100,150,"orange"),(150,200,"red"),(200,300,"purple"),(300,400,"darkred")]
     for lo,hi,c in bands:
-        trend.add_hrect(y0=lo,y1=hi,fillcolor=c,opacity=0.07,line_width=0)
+        trend.add_hrect(y0=lo,y1=hi,fillcolor=c,opacity=0.13,line_width=0)
     trend.add_trace(go.Scatter(x=city_daily["date"],y=city_daily["aqi"],mode="lines+markers",name="actual",line=dict(color="steelblue",width=2)))
     if forecast is not None:
         base_date,X,pred = forecast
         future_dates = [base_date+pd.Timedelta(days=i+1) for i in range(3)]
         trend.add_trace(go.Scatter(x=[base_date]+future_dates,y=[city_daily["aqi"].iloc[-1]]+list(pred),mode="lines+markers",name="forecast",line=dict(color="darkorange",width=2,dash="dash")))
-    trend.update_layout(height=420,margin=dict(l=20,r=20,t=10,b=10),yaxis_title="AQI",legend=dict(orientation="h",yanchor="bottom",y=1.02))
+    trend.update_layout(height=420,margin=dict(l=20,r=20,t=10,b=10),yaxis_title="AQI",legend=dict(orientation="h",yanchor="bottom",y=1.02),template="plotly_dark",paper_bgcolor=DARK_BG,plot_bgcolor=DARK_BG)
     st.plotly_chart(trend,width="stretch")
 
 with section("All cities comparison"):
@@ -315,12 +320,12 @@ with section("All cities comparison"):
     map_col,bar_col = st.columns(2)
     with map_col:
         fig_map = px.scatter_map(comp,lat="lat",lon="lon",size="aqi",color="category",color_discrete_map=color_map,hover_name="city",hover_data={"aqi":":.0f","lat":False,"lon":False,"category":False},zoom=4.2,height=380)
-        fig_map.update_layout(map_style="open-street-map",margin=dict(l=0,r=0,t=0,b=0),legend=dict(orientation="h",yanchor="bottom",y=1.02))
+        fig_map.update_layout(map_style="carto-darkmatter",margin=dict(l=0,r=0,t=0,b=0),legend=dict(orientation="h",yanchor="bottom",y=1.02),paper_bgcolor=DARK_BG,font=dict(color="#E6EDF3"))
         st.plotly_chart(fig_map,width="stretch")
     with bar_col:
         fig_bar = px.bar(comp.sort_values("aqi"),x="aqi",y="city",orientation="h",color="category",color_discrete_map=color_map,text="aqi")
         fig_bar.update_traces(texttemplate="%{text:.0f}",textposition="outside")
-        fig_bar.update_layout(height=380,margin=dict(l=20,r=20,t=10,b=10),showlegend=False,xaxis_title="AQI",yaxis_title=None)
+        fig_bar.update_layout(height=380,margin=dict(l=20,r=20,t=10,b=10),showlegend=False,xaxis_title="AQI",yaxis_title=None,template="plotly_dark",paper_bgcolor=DARK_BG,plot_bgcolor=DARK_BG)
         st.plotly_chart(fig_bar,width="stretch")
 
 tab1,tab2 = st.tabs(["Explainability","Model performance"])
@@ -338,7 +343,11 @@ with tab1:
             explanation = shap.Explanation(values=sv[0],base_values=explainer.expected_value[0],data=X.iloc[0].values,feature_names=features)
             plt.figure(figsize=(9,6))
             shap.plots.waterfall(explanation,show=False,max_display=12)
-            st.pyplot(plt.gcf(),width="stretch")
+            fig = plt.gcf()
+            fig.patch.set_facecolor(DARK_BG)
+            for ax in fig.axes:
+                ax.set_facecolor(DARK_BG)
+            st.pyplot(fig,width="stretch",facecolor=DARK_BG)
             plt.close()
 
 with tab2:
