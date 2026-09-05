@@ -25,8 +25,7 @@ five cities and a SHAP breakdown of what drove the prediction.
 
 OpenWeather returns its own air quality index as a number from 1 to 5. That is far too
 coarse to forecast against, so I compute the US EPA AQI from the raw pollutant
-concentrations instead, which is the 0 to 500 scale that aqicn.org and most real dashboards
-show.
+concentrations instead, which is the 0 to 500 scale that aqicn.org shows.
 
 Getting there takes a few steps. The gas pollutants come back in micrograms per cubic metre
 and the EPA table expects parts per billion or parts per million, so ozone, carbon
